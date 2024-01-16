@@ -1,18 +1,44 @@
 param($DomainObject)
 
-Import-Module '.\DNSHelper.psm1'
+Import-Module DNSHealth
+
+try {
+    $ConfigTable = Get-CippTable -tablename Config
+    $Filter = "PartitionKey eq 'Domains' and RowKey eq 'Domains'"
+    $Config = Get-CIPPAzDataTableEntity @ConfigTable -Filter $Filter
+
+    $ValidResolvers = @('Google', 'CloudFlare', 'Quad9')
+    if ($ValidResolvers -contains $Config.Resolver) {
+        $Resolver = $Config.Resolver
+    }
+    else {
+        $Resolver = 'Google'
+        $Config = @{
+            PartitionKey = 'Domains'
+            RowKey       = 'Domains'
+            Resolver     = $Resolver
+        }
+        Add-CIPPAzDataTableEntity @ConfigTable -Entity $Config -Force
+    }
+}
+catch {
+    $Resolver = 'Google'
+}
+Set-DnsResolver -Resolver $Resolver
 
 $Domain = $DomainObject.rowKey
 
 try {
-    $Tenant = $Domain.TenantDetails | ConvertFrom-Json
+    $Tenant = $DomainObject.TenantDetails | ConvertFrom-Json -ErrorAction Stop
 }
 catch {
+    $Tenant = @{Tenant = 'None' }
 }
 
-Log-request -API 'DomainAnalyser' -tenant $tenant.tenant -message "Starting Processing of $Domain" -sev Debug
+#Write-Host "$($DomainObject.TenantDetails)"
+
 $Result = [PSCustomObject]@{
-    Tenant               = $DomainObject.partitionKey
+    Tenant               = $Tenant.Tenant
     GUID                 = $($Domain.Replace('.', ''))
     LastRefresh          = $(Get-Date (Get-Date).ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z')
     Domain               = $Domain
@@ -52,7 +78,7 @@ $ScoreDomain = 0
 $ScoreExplanation = [System.Collections.Generic.List[string]]::new()
 
 # Check MX Record
-$MXRecord = Read-MXRecord -Domain $Domain
+$MXRecord = Read-MXRecord -Domain $Domain -ErrorAction Stop
 
 $Result.ExpectedSPFRecord = $MXRecord.ExpectedInclude
 $Result.MXPassTest = $false
@@ -78,7 +104,7 @@ else {
 
 # Get SPF Record
 try {
-    $SPFRecord = Read-SPFRecord -Domain $Domain
+    $SPFRecord = Read-SpfRecord -Domain $Domain -ErrorAction Stop
     if ($SPFRecord.RecordCount -gt 0) {
         $Result.ActualSPFRecord = $SPFRecord.Record
         if ($SPFRecord.RecordCount -eq 1) {
@@ -94,7 +120,9 @@ try {
     }
 }
 catch {
-    Log-request -API 'DomainAnalyser' -tenant $tenant.tenant -message "Exception and Error while getting SPF Record with $($_.Exception.Message)" -sev Error
+    $Message = 'SPF Exception: {0} line {1} - {2}' -f $_.InvocationInfo.ScriptName, $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message
+    Write-LogMessage -API 'DomainAnalyser' -tenant $tenant.tenant -message $Message -sev Error
+    throw $Message
 }
     
 # Check SPF Record
@@ -114,7 +142,7 @@ else {
 
 # Get DMARC Record
 try {
-    $DMARCPolicy = Read-DmarcPolicy -Domain $Domain
+    $DMARCPolicy = Read-DmarcPolicy -Domain $Domain -ErrorAction Stop
 
     If ([string]::IsNullOrEmpty($DMARCPolicy.Record)) {
         $Result.DMARCPresent = $false
@@ -160,12 +188,14 @@ try {
     }
 }
 catch {
-    Log-request -API 'DomainAnalyser' -tenant $tenant.tenant -message "Exception and Error while getting DMARC Record with $($_.Exception.Message)" -sev Error
+    $Message = 'DMARC Exception: {0} line {1} - {2}' -f $_.InvocationInfo.ScriptName, $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message
+    Write-LogMessage -API 'DomainAnalyser' -tenant $tenant.tenant -message $Message -sev Error
+    throw $Message
 }
 
 # DNS Sec Check
 try {
-    $DNSSECResult = Test-DNSSEC -Domain $Domain
+    $DNSSECResult = Test-DNSSEC -Domain $Domain -ErrorAction Stop
     $DNSSECFailCount = $DNSSECResult.ValidationFails | Measure-Object | Select-Object -ExpandProperty Count
     $DNSSECWarnCount = $DNSSECResult.ValidationFails | Measure-Object | Select-Object -ExpandProperty Count
     if (($DNSSECFailCount + $DNSSECWarnCount) -eq 0) {
@@ -178,7 +208,9 @@ try {
     }
 }
 catch {
-    Log-request -API 'DomainAnalyser' -tenant $tenant.tenant -message "Exception and Error while getting DNSSEC with $($_.Exception.Message)" -sev Error
+    $Message = 'DNSSEC Exception: {0} line {1} - {2}' -f $_.InvocationInfo.ScriptName, $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message
+    Write-LogMessage -API 'DomainAnalyser' -tenant $tenant.tenant -message $Message -sev Error
+    throw $Message
 }
 
 # DKIM Check
@@ -190,7 +222,7 @@ try {
         $DkimParams.Selectors = $DomainObject.DkimSelectors | ConvertFrom-Json
     }
 
-    $DkimRecord = Read-DkimRecord @DkimParams
+    $DkimRecord = Read-DkimRecord @DkimParams -ErrorAction Stop
     
     $DkimRecordCount = $DkimRecord.Records | Measure-Object | Select-Object -ExpandProperty Count
     $DkimFailCount = $DkimRecord.ValidationFails | Measure-Object | Select-Object -ExpandProperty Count
@@ -205,7 +237,9 @@ try {
     }
 }
 catch {
-    Log-request -API 'DomainAnalyser' -tenant $tenant.tenant -message "DKIM Lookup Failed with $($_.Exception.Message)" -sev Error
+    $Message = 'DKIM Exception: {0} line {1} - {2}' -f $_.InvocationInfo.ScriptName, $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message
+    Write-LogMessage -API 'DomainAnalyser' -tenant $tenant.tenant -message $Message -sev Error
+    throw $Message
 }
 # Final Score
 $Result.Score = $ScoreDomain
@@ -213,9 +247,9 @@ $Result.ScorePercentage = [int](($Result.Score / $Result.MaximumScore) * 100)
 $Result.ScoreExplanation = ($ScoreExplanation) -join ', '
 
 
-$DomainObject.DomainAnalyser = ($Result | ConvertTo-Json)
+$DomainObject.DomainAnalyser = ($Result | ConvertTo-Json -Compress).ToString()
 
 # Final Write to Output
-Log-request -API 'DomainAnalyser' -tenant $tenant.tenant -message "DNS Analyser Finished For $Domain" -sev Info
+Write-LogMessage -API 'DomainAnalyser' -tenant $tenant.tenant -message "DNS Analyser Finished For $Domain" -sev Info
 
 Write-Output $DomainObject
