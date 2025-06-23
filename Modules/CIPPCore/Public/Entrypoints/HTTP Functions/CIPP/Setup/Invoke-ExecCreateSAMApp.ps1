@@ -1,11 +1,11 @@
 using namespace System.Net
 
-Function Invoke-ExecCreateSAMApp {
+function Invoke-ExecCreateSAMApp {
     <#
     .FUNCTIONALITY
         Entrypoint,AnyTenant
     .ROLE
-        CIPP.AppSettings.ReadWrite.
+        CIPP.AppSettings.ReadWrite
     #>
     [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingConvertToSecureStringWithPlainText', '')]
     [CmdletBinding()]
@@ -19,7 +19,7 @@ Function Invoke-ExecCreateSAMApp {
             $URL = ($Request.headers.'x-ms-original-url').split('/api') | Select-Object -First 1
             $TenantId = (Invoke-RestMethod 'https://graph.microsoft.com/v1.0/organization' -Headers @{ authorization = "Bearer $($Token.access_token)" } -Method GET -ContentType 'application/json').value.id
             #Find Existing app registration
-            $AppId = (Invoke-RestMethod 'https://graph.microsoft.com/v1.0/applications' -Headers @{ authorization = "Bearer $($Token.access_token)" } -Method GET -ContentType 'application/json' -Body "{ `"filter`": `"displayName eq 'CIPP-SAM'`" }").value | Select-Object -Last 1
+            $AppId = (Invoke-RestMethod "https://graph.microsoft.com/v1.0/applications?`$filter=displayName eq 'CIPP-SAM'" -Headers @{ authorization = "Bearer $($Token.access_token)" } -Method GET -ContentType 'application/json').value | Select-Object -Last 1
             #Check if the appId has the redirect URI, if not, add it.
             if ($AppId) {
                 Write-Host "Found existing app: $($AppId.id). Reusing."
@@ -84,10 +84,19 @@ Function Invoke-ExecCreateSAMApp {
                 Write-Information ($Secret | ConvertTo-Json -Depth 5)
                 Add-CIPPAzDataTableEntity @DevSecretsTable -Entity $Secret -Force
             } else {
+
                 Set-AzKeyVaultSecret -VaultName $kv -Name 'tenantid' -SecretValue (ConvertTo-SecureString -String $TenantId -AsPlainText -Force)
                 Set-AzKeyVaultSecret -VaultName $kv -Name 'applicationid' -SecretValue (ConvertTo-SecureString -String $Appid.appId -AsPlainText -Force)
                 Set-AzKeyVaultSecret -VaultName $kv -Name 'applicationsecret' -SecretValue (ConvertTo-SecureString -String $AppPassword -AsPlainText -Force)
             }
+            $ConfigTable = Get-CippTable -tablename 'Config'
+            #update the ConfigTable with the latest appId, for caching compare.
+            $NewConfig = @{
+                PartitionKey  = 'AppCache'
+                RowKey        = 'AppCache'
+                ApplicationId = $AppId.appId
+            }
+            Add-CIPPAzDataTableEntity @ConfigTable -Entity $NewConfig -Force | Out-Null
             $Results = @{'message' = "Succesfully $state the application registration. The application ID is $($AppId.appid). You may continue to the next step."; severity = 'success' }
         }
 
