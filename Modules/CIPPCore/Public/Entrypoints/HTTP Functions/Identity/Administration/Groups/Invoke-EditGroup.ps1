@@ -22,7 +22,6 @@ function Invoke-EditGroup {
 
     $AddMembers = $UserObj.AddMember
 
-
     $TenantId = $UserObj.tenantId ?? $UserObj.tenantFilter
 
     $MemberODataBindString = 'https://graph.microsoft.com/v1.0/directoryObjects/{0}'
@@ -70,8 +69,8 @@ function Invoke-EditGroup {
         $AddMembers | ForEach-Object {
             try {
                 # Add to group user action and edit group page sends in different formats, so we need to handle both
-                $Member = $_.value ?? $_
-                $MemberID = $_.addedFields.id
+                $Member = $_.addedFields.userPrincipalName ?? $_.value ?? $_
+                $MemberID = $_.value
                 if (!$MemberID) {
                     $MemberID = (New-GraphGetRequest -uri "https://graph.microsoft.com/beta/users/$Member" -tenantid $TenantId).id
                 }
@@ -147,8 +146,8 @@ function Invoke-EditGroup {
     try {
         if ($RemoveContact) {
             $RemoveContact | ForEach-Object {
-                $Member = $_.value
-                $MemberID = $_.addedFields.id
+                $Member = $_.addedFields.userPrincipalName ?? $_.value
+                $MemberID = $_.value
                 if ($GroupType -eq 'Distribution list' -or $GroupType -eq 'Mail-Enabled Security') {
                     $Params = @{ Identity = $GroupId; Member = $MemberID ; BypassSecurityGroupManagerCheck = $true }
                     $ExoBulkRequests.Add(@{
@@ -175,8 +174,8 @@ function Invoke-EditGroup {
     try {
         if ($RemoveMembers) {
             $RemoveMembers | ForEach-Object {
-                $Member = $_.value
-                $MemberID = $_.addedFields.id
+                $Member = $_.addedFields.userPrincipalName ?? $_.value
+                $MemberID = $_.value
                 if ($GroupType -eq 'Distribution list' -or $GroupType -eq 'Mail-Enabled Security') {
                     $Params = @{ Identity = $GroupId; Member = $Member ; BypassSecurityGroupManagerCheck = $true }
                     $ExoBulkRequests.Add(@{
@@ -211,8 +210,8 @@ function Invoke-EditGroup {
         if ($AddOwners) {
             if ($GroupType -notin @('Distribution List', 'Mail-Enabled Security')) {
                 $AddOwners | ForEach-Object {
-                    $Owner = $_.value
-                    $ID = $_.addedFields.id
+                    $Owner = $_.addedFields.userPrincipalName ?? $_.value
+                    $ID = $_.value
 
                     $BulkRequests.Add(@{
                             id      = "addOwner-$Owner"
@@ -226,7 +225,7 @@ function Invoke-EditGroup {
                             }
                         })
                     $GraphLogs.Add(@{
-                            message = "Added $Owner to $($GroupName) group"
+                            message = "Added owner $($Owner) to $($GroupName) group"
                             id      = "addOwner-$Owner"
                         })
                 }
@@ -241,14 +240,15 @@ function Invoke-EditGroup {
         if ($RemoveOwners) {
             if ($GroupType -notin @('Distribution List', 'Mail-Enabled Security')) {
                 $RemoveOwners | ForEach-Object {
-                    $ID = $_.addedFields.id
+                    $ID = $_.value
+                    $Owner = $_.addedFields.userPrincipalName ?? $_.value
                     $BulkRequests.Add(@{
                             id     = "removeOwner-$ID"
                             method = 'DELETE'
                             url    = "groups/$($GroupId)/owners/$ID/`$ref"
                         })
                     $GraphLogs.Add(@{
-                            message = "Removed $($_.value) from $($GroupName) group"
+                            message = "Removed owner $($Owner) from $($GroupName) group"
                             id      = "removeOwner-$ID"
                         })
                 }
@@ -263,8 +263,8 @@ function Invoke-EditGroup {
 
         $NewManagedBy = [System.Collections.Generic.List[string]]::new()
         foreach ($CurrentOwner in $CurrentOwners) {
-            if ($RemoveOwners -and $RemoveOwners.addedFields.id -contains $CurrentOwner) {
-                $OwnerToRemove = $RemoveOwners | Where-Object { $_.addedFields.id -eq $CurrentOwner }
+            if ($RemoveOwners -and $RemoveOwners.value -contains $CurrentOwner) {
+                $OwnerToRemove = $RemoveOwners | Where-Object { $_.value -eq $CurrentOwner }
                 $ExoLogs.Add(@{
                         message = "Removed owner $($OwnerToRemove.label) from $($GroupName) group"
                         target  = $GroupId
@@ -275,7 +275,7 @@ function Invoke-EditGroup {
         }
         if ($AddOwners) {
             foreach ($NewOwner in $AddOwners) {
-                $NewManagedBy.Add($NewOwner.addedFields.id)
+                $NewManagedBy.Add($NewOwner.value)
                 $ExoLogs.Add(@{
                         message = "Added owner $($NewOwner.label) to $($GroupName) group"
                         target  = $GroupId
