@@ -13,6 +13,9 @@ function Invoke-CIPPStandardPWcompanionAppAllowedState {
         CAT
             Entra (AAD) Standards
         TAG
+            "EIDSCA.AM01"
+        EXECUTIVETEXT
+            Enables a simplified authentication experience by allowing users to authenticate directly through Outlook without requiring a separate authenticator app. This improves user convenience while maintaining security standards for passwordless authentication.
         ADDEDCOMPONENT
             {"type":"autoComplete","multiple":false,"creatable":false,"label":"Select value","name":"standards.PWcompanionAppAllowedState.state","options":[{"label":"Enabled","value":"enabled"},{"label":"Disabled","value":"disabled"},{"label":"Microsoft managed","value":"default"}]}
         IMPACT
@@ -30,7 +33,14 @@ function Invoke-CIPPStandardPWcompanionAppAllowedState {
 
     param($Tenant, $Settings)
 
-    $AuthenticatorFeaturesState = (New-GraphGetRequest -tenantid $Tenant -Uri 'https://graph.microsoft.com/beta/policies/authenticationMethodsPolicy/authenticationMethodConfigurations/microsoftAuthenticator')
+    try {
+        $AuthenticatorFeaturesState = (New-GraphGetRequest -tenantid $Tenant -Uri 'https://graph.microsoft.com/beta/policies/authenticationMethodsPolicy/authenticationMethodConfigurations/microsoftAuthenticator')
+    }
+    catch {
+        $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
+        Write-LogMessage -API 'Standards' -Tenant $Tenant -Message "Could not get the PWcompanionAppAllowedState state for $Tenant. Error: $ErrorMessage" -Sev Error
+        return
+    }
 
     # Get state value using null-coalescing operator
     $CurrentState = $AuthenticatorFeaturesState.featureSettings.companionAppAllowedState.state
@@ -44,8 +54,6 @@ function Invoke-CIPPStandardPWcompanionAppAllowedState {
     }
 
     If ($Settings.remediate -eq $true) {
-        Write-Host "Remediating PWcompanionAppAllowedState for tenant $Tenant to $WantedState"
-
         if ($AuthStateCorrect -eq $true) {
             Write-LogMessage -API 'Standards' -tenant $Tenant -message "companionAppAllowedState is already set to the desired state of $WantedState." -sev Info
         } else {
@@ -92,6 +100,12 @@ function Invoke-CIPPStandardPWcompanionAppAllowedState {
         } else {
             $FieldValue = $AuthenticatorFeaturesState.featureSettings.companionAppAllowedState
         }
-        Set-CIPPStandardsCompareField -FieldName 'standards.PWcompanionAppAllowedState' -FieldValue $FieldValue -Tenant $Tenant
+        $CurrentValue = @{
+            companionAppAllowedState = $AuthenticatorFeaturesState.featureSettings.companionAppAllowedState.state
+        }
+        $ExpectedValue = @{
+            companionAppAllowedState = $WantedState
+        }
+        Set-CIPPStandardsCompareField -FieldName 'standards.PWcompanionAppAllowedState' -CurrentValue $CurrentValue -ExpectedValue $ExpectedValue -Tenant $Tenant
     }
 }

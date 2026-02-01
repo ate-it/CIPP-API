@@ -20,6 +20,9 @@ function Add-CIPPScheduledTask {
         [string]$RowKey,
 
         [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
+        [string]$DesiredStartTime = $null,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'Default')]
         [Parameter(Mandatory = $false, ParameterSetName = 'RunNow')]
         $Headers
     )
@@ -43,8 +46,14 @@ function Add-CIPPScheduledTask {
                 return "Could not run task: $ErrorMessage"
             }
         } else {
+            if (!$Task.RowKey) {
+                $RowKey = (New-Guid).Guid
+            } else {
+                $RowKey = $Task.RowKey
+            }
+
             if ($DisallowDuplicateName) {
-                $Filter = "PartitionKey eq 'ScheduledTask' and Name eq '$($Task.Name)'"
+                $Filter = "PartitionKey eq 'ScheduledTask' and Name eq '$($Task.Name)' and TaskState ne 'Completed' and TaskState ne 'Failed'"
                 $ExistingTask = (Get-CIPPAzDataTableEntity @Table -Filter $Filter)
                 if ($ExistingTask) {
                     return "Task with name $($Task.Name) already exists"
@@ -53,7 +62,7 @@ function Add-CIPPScheduledTask {
 
             $propertiesToCheck = @('Webhook', 'Email', 'PSA')
             $PostExecutionObject = ($propertiesToCheck | Where-Object { $task.PostExecution.$_ -eq $true })
-            $PostExecution = $PostExecutionObject ? ($PostExecutionObject -join ',') : ($Task.PostExecution.value -join ',')
+            $PostExecution = $PostExecutionObject ? @($PostExecutionObject -join ',') : ($Task.PostExecution.value -join ',')
             $Parameters = [System.Collections.Hashtable]@{}
             foreach ($Key in $task.Parameters.PSObject.Properties.Name) {
                 $Param = $task.Parameters.$Key
@@ -107,11 +116,7 @@ function Add-CIPPScheduledTask {
             }
             $AdditionalProperties = ([PSCustomObject]$AdditionalProperties | ConvertTo-Json -Compress)
             if ($Parameters -eq 'null') { $Parameters = '' }
-            if (!$Task.RowKey) {
-                $RowKey = (New-Guid).Guid
-            } else {
-                $RowKey = $Task.RowKey
-            }
+
 
             $Recurrence = if ([string]::IsNullOrEmpty($task.Recurrence.value)) {
                 $task.Recurrence
@@ -119,8 +124,28 @@ function Add-CIPPScheduledTask {
                 $task.Recurrence.value
             }
 
-            if ([int64]$task.ScheduledTime -eq 0 -or [string]::IsNullOrEmpty($task.ScheduledTime)) {
-                $task.ScheduledTime = [int64](([datetime]::UtcNow) - (Get-Date '1/1/1970')).TotalSeconds
+            if ($task.PSObject.Properties.Name -notcontains 'ScheduledTime') {
+                $task | Add-Member -MemberType NoteProperty -Name 'ScheduledTime' -Value 0 -Force
+            }
+
+            if ($DesiredStartTime) {
+                try {
+                    # Parse the epoch time
+                    $epochSeconds = [int64]$DesiredStartTime
+                    # Set ScheduledTime to the desired time
+                    $task.ScheduledTime = $epochSeconds
+                } catch {
+                    Write-Warning "Failed to parse DesiredStartTime: $DesiredStartTime. Using provided ScheduledTime."
+                    # Fall back to default
+                    if ([int64]$task.ScheduledTime -eq 0 -or [string]::IsNullOrEmpty($task.ScheduledTime)) {
+                        $task.ScheduledTime = [int64](([datetime]::UtcNow) - (Get-Date '1/1/1970')).TotalSeconds
+                    }
+                }
+            } else {
+                # No DesiredStartTime - use current behavior (immediate execution)
+                if ([int64]$task.ScheduledTime -eq 0 -or [string]::IsNullOrEmpty($task.ScheduledTime)) {
+                    $task.ScheduledTime = [int64](([datetime]::UtcNow) - (Get-Date '1/1/1970')).TotalSeconds
+                }
             }
             $excludedTenants = if ($task.excludedTenants.value) {
                 $task.excludedTenants.value -join ','
@@ -162,9 +187,17 @@ function Add-CIPPScheduledTask {
                 ScheduledTime        = [string]$task.ScheduledTime
                 Recurrence           = [string]$Recurrence
                 PostExecution        = [string]$PostExecution
+                Reference            = [string]$task.Reference
                 AdditionalProperties = [string]$AdditionalProperties
                 Hidden               = [bool]$Hidden
                 Results              = 'Planned'
+                AlertComment         = [string]$task.AlertComment
+            }
+
+
+            # Always store DesiredStartTime if provided
+            if ($DesiredStartTime) {
+                $entity['DesiredStartTime'] = [string]$DesiredStartTime
             }
 
             # Store the original tenant filter for group expansion during execution
@@ -181,6 +214,40 @@ function Add-CIPPScheduledTask {
                     # Not a JSON object, ignore
                 }
             }
+
+            if ($task.Trigger) {
+                $entity.Trigger = [string]($task.Trigger | ConvertTo-Json -Compress)
+                $TriggerType = $task.Trigger.Type.value ?? $task.Trigger.Type
+                if ($TriggerType -eq 'DeltaQuery') {
+                    $Parameters = @{}
+                    if ($task.Trigger.WatchedAttributes -and ($task.Trigger.WatchedAttributes | Measure-Object).Count -gt 0) {
+                        $Parameters.'$select' = $task.Trigger.WatchedAttributes | ForEach-Object { $_.value ?? $_ } -join ','
+                    }
+                    if ($task.Trigger.ResourceFilter) {
+                        $ResourceFilterValues = $task.Trigger.ResourceFilter | ForEach-Object { $_.value ?? $_ }
+                        $Parameters.'$filter' = "id eq '" + ($ResourceFilterValues -join "' or id eq '") + "'"
+                    }
+                    $Resource = $task.Trigger.DeltaResource.value ?? $task.Trigger.DeltaResource
+
+                    if ($entity.TenantGroup) {
+                        $tenantFilter = $entity.TenantGroup | ConvertFrom-Json
+                    }
+                    $DeltaQuery = @{
+                        TenantFilter = $tenantFilter
+                        Resource     = $Resource
+                        Parameters   = $Parameters
+                        PartitionKey = $RowKey
+                    }
+
+                    try {
+                        $null = New-GraphDeltaQuery @DeltaQuery
+                        Write-Information "Created delta query for resource $($Resource)"
+                    } catch {
+                        Write-Warning "Failed to create delta query for resource $($Resource): $($_.Exception.Message)"
+                    }
+                }
+            }
+
             if ($SyncType) {
                 $entity.SyncType = $SyncType
             }
@@ -188,14 +255,56 @@ function Add-CIPPScheduledTask {
                 Add-CIPPAzDataTableEntity @Table -Entity $entity -Force
             } catch {
                 $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-                return "Could not add task: $ErrorMessage"
+                Write-Information $_.InvocationInfo.PositionMessage
+                Write-Information ($entity | ConvertTo-Json)
+                return "Error - Could not add task: $ErrorMessage"
             }
-            return "Successfully added task: $($entity.Name)"
+            Write-LogMessage -headers $Headers -API 'ScheduledTask' -message "Added task $($entity.Name) with ID $($entity.RowKey)" -Sev 'Info' -Tenant $tenantFilter
+
+            # Calculate relative time for next run
+            $scheduledEpoch = [int64]$entity.ScheduledTime
+            $currentTime = [datetime]::UtcNow
+
+            if ($scheduledEpoch -eq 0 -or $scheduledEpoch -le ([int64](($currentTime) - (Get-Date '1/1/1970')).TotalSeconds)) {
+                # Task will run at next 15-minute interval - calculate efficiently
+                $minutesToAdd = 15 - ($currentTime.Minute % 15)
+                $nextRunTime = $currentTime.AddMinutes($minutesToAdd).AddSeconds(-$currentTime.Second).AddMilliseconds(-$currentTime.Millisecond)
+                $timeUntilRun = $nextRunTime - $currentTime
+            } else {
+                # Task is scheduled for a specific time in the future
+                $scheduledTime = [datetime]'1/1/1970' + [TimeSpan]::FromSeconds($scheduledEpoch)
+                $timeUntilRun = $scheduledTime - $currentTime
+            }
+
+            # Format relative time
+            $relativeTime = switch ($timeUntilRun.TotalMinutes) {
+                { $_ -ge 1440 } {
+                    $days = [Math]::Floor($timeUntilRun.TotalDays)
+                    $hours = $timeUntilRun.Hours
+                    $result = "$days day$(if ($days -ne 1) { 's' })"
+                    if ($hours -gt 0) { $result += " and $hours hour$(if ($hours -ne 1) { 's' })" }
+                    $result
+                    break
+                }
+                { $_ -ge 60 } {
+                    $hours = [Math]::Floor($timeUntilRun.TotalHours)
+                    $minutes = $timeUntilRun.Minutes
+                    $result = "$hours hour$(if ($hours -ne 1) { 's' })"
+                    if ($minutes -gt 0) { $result += " and $minutes minute$(if ($minutes -ne 1) { 's' })" }
+                    $result
+                    break
+                }
+                { $_ -ge 2 } { "about $([Math]::Round($_)) minutes"; break }
+                { $_ -ge 1 } { 'about 1 minute'; break }
+                default { 'less than a minute' }
+            }
+
+            return "Successfully added task: $($entity.Name). It will run in $relativeTime."
         }
     } catch {
         Write-Warning "Failed to add scheduled task: $($_.Exception.Message)"
-        Write-Information $_.InvocationInfo.PositionMessage
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-        throw "Could not add task: $ErrorMessage"
+        #Write-Information ($Task | ConvertTo-Json)
+        throw "Error - Could not add task: $ErrorMessage"
     }
 }

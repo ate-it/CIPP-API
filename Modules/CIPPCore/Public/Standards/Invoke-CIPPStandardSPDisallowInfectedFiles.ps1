@@ -13,7 +13,11 @@ function Invoke-CIPPStandardSPDisallowInfectedFiles {
         CAT
             SharePoint Standards
         TAG
-            "CIS"
+            "CIS M365 5.0 (7.3.1)"
+            "CISA (MS.SPO.3.1v1)"
+            "NIST CSF 2.0 (DE.CM-09)"
+        EXECUTIVETEXT
+            Prevents employees from downloading files that have been identified as containing malware or viruses from SharePoint and OneDrive. This security measure protects against malware distribution through file sharing while maintaining access to clean, safe documents.
         ADDEDCOMPONENT
         IMPACT
             Low Impact
@@ -31,10 +35,21 @@ function Invoke-CIPPStandardSPDisallowInfectedFiles {
     #>
 
     param($Tenant, $Settings)
-    Test-CIPPStandardLicense -StandardName 'SPDisallowInfectedFiles' -TenantFilter $Tenant -RequiredCapabilities @('SHAREPOINTWAC', 'SHAREPOINTSTANDARD', 'SHAREPOINTENTERPRISE', 'ONEDRIVE_BASIC', 'ONEDRIVE_ENTERPRISE')
+    $TestResult = Test-CIPPStandardLicense -StandardName 'SPDisallowInfectedFiles' -TenantFilter $Tenant -RequiredCapabilities @('SHAREPOINTWAC', 'SHAREPOINTSTANDARD', 'SHAREPOINTENTERPRISE', 'SHAREPOINTENTERPRISE_EDU','ONEDRIVE_BASIC', 'ONEDRIVE_ENTERPRISE')
 
-    $CurrentState = Get-CIPPSPOTenant -TenantFilter $Tenant |
+    if ($TestResult -eq $false) {
+        return $true
+    } #we're done.
+
+    try {
+        $CurrentState = Get-CIPPSPOTenant -TenantFilter $Tenant |
         Select-Object -Property _ObjectIdentity_, TenantFilter, DisallowInfectedFileDownload
+    }
+    catch {
+        $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
+        Write-LogMessage -API 'Standards' -Tenant $Tenant -Message "Could not get the SPDisallowInfectedFiles state for $Tenant. Error: $ErrorMessage" -Sev Error
+        return
+    }
 
     $StateIsCorrect = ($CurrentState.DisallowInfectedFileDownload -eq $true)
 
@@ -69,11 +84,12 @@ function Invoke-CIPPStandardSPDisallowInfectedFiles {
     if ($Settings.report -eq $true) {
         Add-CIPPBPAField -FieldName 'SPDisallowInfectedFiles' -FieldValue $StateIsCorrect -StoreAs bool -Tenant $Tenant
 
-        if ($StateIsCorrect) {
-            $FieldValue = $true
-        } else {
-            $FieldValue = $CurrentState
+        $CurrentValue = @{
+            DisallowInfectedFileDownload = $CurrentState.DisallowInfectedFileDownload
         }
-        Set-CIPPStandardsCompareField -FieldName 'standards.SPDisallowInfectedFiles' -FieldValue $FieldValue -Tenant $Tenant
+        $ExpectedValue = @{
+            DisallowInfectedFileDownload = $true
+        }
+        Set-CIPPStandardsCompareField -FieldName 'standards.SPDisallowInfectedFiles' -CurrentValue $CurrentValue -ExpectedValue $ExpectedValue -Tenant $Tenant
     }
 }
