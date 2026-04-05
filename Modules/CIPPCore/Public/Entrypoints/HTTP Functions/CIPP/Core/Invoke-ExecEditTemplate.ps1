@@ -1,5 +1,3 @@
-using namespace System.Net
-
 function Invoke-ExecEditTemplate {
     <#
     .FUNCTIONALITY
@@ -11,21 +9,59 @@ function Invoke-ExecEditTemplate {
     param($Request, $TriggerMetadata)
 
     $APIName = $Request.Params.CIPPEndpoint
-    $Headers = $Request.Headers
-    Write-LogMessage -headers $Headers -API $APIName -message 'Accessed this API' -Sev 'Debug'
-
     try {
         $Table = Get-CippTable -tablename 'templates'
-        $guid = $request.body.id
-        $JSON = ConvertTo-Json -Compress -Depth 100 -InputObject ($request.body | Select-Object * -ExcludeProperty GUID)
-        $Type = $request.query.Type
+        $guid = $request.Body.id ? $request.Body.id : $request.Body.GUID
+        $JSON = ConvertTo-Json -Compress -Depth 100 -InputObject ($request.Body | Select-Object * -ExcludeProperty GUID)
+        $Type = $request.Query.Type ?? $Request.Body.Type
 
         if ($Type -eq 'IntuneTemplate') {
             Write-Host 'Intune Template'
-            $OriginalTemplate = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'IntuneTemplate' and RowKey eq '$GUID'"
-            $OriginalTemplate = ($OriginalTemplate.JSON | ConvertFrom-Json -Depth 100)
-            $RawJSON = ConvertTo-Json -Compress -Depth 100 -InputObject $Request.body.parsedRAWJson
-            Set-CIPPIntuneTemplate -RawJSON $RawJSON -GUID $GUID -DisplayName $Request.body.displayName -Description $Request.body.description -templateType $OriginalTemplate.Type -Headers $Request.Headers
+            $SafeGUID = ConvertTo-CIPPODataFilterValue -Value $GUID -Type Guid
+            $Template = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'IntuneTemplate' and RowKey eq '$SafeGUID'"
+            $OriginalJSON = $Template.JSON
+
+            $TemplateData = $Template.JSON | ConvertFrom-Json
+            $TemplateType = $TemplateData.Type
+
+            if ($Template.SHA) {
+                $NewGuid = [guid]::NewGuid().ToString()
+            } else {
+                $NewGuid = $GUID
+            }
+            if ($Request.Body.parsedRAWJson) {
+                $RawJSON = ConvertTo-Json -Compress -Depth 100 -InputObject $Request.Body.parsedRAWJson
+            } else {
+                $RawJSON = $TemplateData.RAWJson
+            }
+
+            # Extract display name — different policy types use different fields inside RAWJson
+            $ParsedRaw = $RawJSON | ConvertFrom-Json -ErrorAction SilentlyContinue
+            $DisplayName = $Request.Body.displayName ?? $ParsedRaw.displayName ?? $ParsedRaw.name ?? $TemplateData.Displayname
+
+            # Sync the resolved display name back into the RAWJson so it stays consistent
+            if ($ParsedRaw -and $DisplayName) {
+                # Property casing varies by policy type (displayName vs name)
+                $rawProps = $ParsedRaw.PSObject.Properties.Name
+                if ($rawProps -contains 'displayName') {
+                    $ParsedRaw.displayName = $DisplayName
+                }
+                if ($rawProps -contains 'name') {
+                    $ParsedRaw.name = $DisplayName
+                }
+                $RawJSON = ConvertTo-Json -Compress -Depth 100 -InputObject $ParsedRaw
+            }
+
+            $IntuneTemplate = @{
+                GUID         = $NewGuid
+                RawJson      = $RawJSON
+                DisplayName  = $DisplayName
+                Description  = $Request.Body.description ?? $TemplateData.Description
+                templateType = $TemplateType
+                Package      = $Template.Package
+                Headers      = $Request.Headers
+            }
+            Set-CIPPIntuneTemplate @IntuneTemplate
         } else {
             $Table.Force = $true
             Add-CIPPAzDataTableEntity @Table -Entity @{
@@ -34,7 +70,7 @@ function Invoke-ExecEditTemplate {
                 PartitionKey = "$Type"
                 GUID         = "$GUID"
             }
-            Write-LogMessage -headers $Request.Headers -API $APINAME -message "Edited template $($Request.body.name) with GUID $GUID" -Sev 'Debug'
+            Write-LogMessage -headers $Request.Headers -API $APINAME -message "Edited template $($Request.Body.name) with GUID $GUID" -Sev 'Debug'
         }
         $body = [pscustomobject]@{ 'Results' = 'Successfully saved the template' }
 
@@ -44,8 +80,7 @@ function Invoke-ExecEditTemplate {
     }
 
 
-    # Associate values to output bindings by calling 'Push-OutputBinding'.
-    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+    return ([HttpResponseContext]@{
             StatusCode = [HttpStatusCode]::OK
             Body       = $body
         })

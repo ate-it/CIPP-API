@@ -1,6 +1,4 @@
-using namespace System.Net
-
-Function Invoke-ExecSetOoO {
+function Invoke-ExecSetOoO {
     <#
     .FUNCTIONALITY
         Entrypoint
@@ -12,13 +10,12 @@ Function Invoke-ExecSetOoO {
     try {
         $APIName = $Request.Params.CIPPEndpoint
         $Headers = $Request.Headers
-        Write-LogMessage -headers $Headers -API $APIName -message 'Accessed this API' -Sev 'Debug'
+
 
 
         $Username = $Request.Body.userId
         $TenantFilter = $Request.Body.tenantFilter
-        $State = $Request.Body.AutoReplyState.value
-
+        $State = $Request.Body.AutoReplyState.value ?? $Request.Body.AutoReplyState
         $SplatParams = @{
             userid       = $Username
             tenantFilter = $TenantFilter
@@ -54,8 +51,27 @@ Function Invoke-ExecSetOoO {
             $EndTime = $Request.Body.EndTime -match '^\d+$' ? [DateTimeOffset]::FromUnixTimeSeconds([int]$Request.Body.EndTime).DateTime : $Request.Body.EndTime
             $SplatParams.StartTime = $StartTime
             $SplatParams.EndTime = $EndTime
+
+            # Calendar options — only pass when explicitly provided in the request body
+            if ($null -ne $Request.Body.CreateOOFEvent) {
+                $SplatParams.CreateOOFEvent = [bool]$Request.Body.CreateOOFEvent
+            }
+            if (-not [string]::IsNullOrWhiteSpace($Request.Body.OOFEventSubject)) {
+                $SplatParams.OOFEventSubject = $Request.Body.OOFEventSubject
+            }
+            if ($null -ne $Request.Body.AutoDeclineFutureRequestsWhenOOF) {
+                $SplatParams.AutoDeclineFutureRequestsWhenOOF = [bool]$Request.Body.AutoDeclineFutureRequestsWhenOOF
+            }
+            if ($null -ne $Request.Body.DeclineEventsForScheduledOOF) {
+                $SplatParams.DeclineEventsForScheduledOOF = [bool]$Request.Body.DeclineEventsForScheduledOOF
+                $SplatParams.DeclineAllEventsForScheduledOOF = [bool]$Request.Body.DeclineEventsForScheduledOOF
+            }
+            if (-not [string]::IsNullOrWhiteSpace($Request.Body.DeclineMeetingMessage)) {
+                $SplatParams.DeclineMeetingMessage = $Request.Body.DeclineMeetingMessage
+            }
         }
 
+        Write-Information "Setting Out of Office with the following parameters: $($SplatParams | ConvertTo-Json -Depth 10)"
         $Results = Set-CIPPOutOfOffice @SplatParams
         $StatusCode = [HttpStatusCode]::OK
     } catch {
@@ -65,8 +81,7 @@ Function Invoke-ExecSetOoO {
         $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
-    # Associate values to output bindings by calling 'Push-OutputBinding'.
-    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+    return ([HttpResponseContext]@{
             StatusCode = $StatusCode
             Body       = @{'Results' = $($Results) }
         })

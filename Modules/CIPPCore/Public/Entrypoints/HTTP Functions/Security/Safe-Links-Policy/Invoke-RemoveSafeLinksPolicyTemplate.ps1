@@ -1,6 +1,4 @@
-using namespace System.Net
-
-Function Invoke-RemoveSafeLinksPolicyTemplate {
+function Invoke-RemoveSafeLinksPolicyTemplate {
     <#
     .FUNCTIONALITY
         Entrypoint,AnyTenant
@@ -15,7 +13,8 @@ Function Invoke-RemoveSafeLinksPolicyTemplate {
     $ID = $request.query.ID ?? $request.body.ID
     try {
         $Table = Get-CippTable -tablename 'templates'
-        $Filter = "PartitionKey eq 'SafeLinksTemplate' and RowKey eq '$id'"
+        $SafeID = ConvertTo-CIPPODataFilterValue -Value $ID -Type String
+        $Filter = "PartitionKey eq 'SafeLinksTemplate' and RowKey eq '$SafeID'"
         $ClearRow = Get-CIPPAzDataTableEntity @Table -Filter $Filter -Property PartitionKey, RowKey
         Remove-AzDataTableEntity -Force @Table -Entity $ClearRow
         $Result = "Removed SafeLinks Policy Template with ID $ID."
@@ -27,8 +26,7 @@ Function Invoke-RemoveSafeLinksPolicyTemplate {
         Write-LogMessage -Headers $User -API $APINAME -message $Result -Sev 'Error' -LogData $ErrorMessage
         $StatusCode = [HttpStatusCode]::Forbidden
     }
-    # Associate values to output bindings by calling 'Push-OutputBinding'.
-    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+    return ([HttpResponseContext]@{
             StatusCode = $StatusCode
             Body       = @{ Results = $Result }
         })

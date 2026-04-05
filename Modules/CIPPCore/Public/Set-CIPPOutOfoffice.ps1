@@ -12,14 +12,21 @@ function Set-CIPPOutOfOffice {
         $APIName = 'Set Out of Office',
         $Headers,
         $StartTime,
-        $EndTime
+        $EndTime,
+        [bool]$CreateOOFEvent,
+        [string]$OOFEventSubject,
+        [bool]$AutoDeclineFutureRequestsWhenOOF,
+        [bool]$DeclineEventsForScheduledOOF,
+        [bool]$DeclineAllEventsForScheduledOOF,
+        [string]$DeclineMeetingMessage
     )
 
     try {
 
         $CmdParams = @{
-            Identity       = $UserID
-            AutoReplyState = $State
+            Identity         = $UserID
+            AutoReplyState   = $State
+            ExternalAudience = 'None'
         }
 
         if ($PSBoundParameters.ContainsKey('InternalMessage')) {
@@ -28,6 +35,7 @@ function Set-CIPPOutOfOffice {
 
         if ($PSBoundParameters.ContainsKey('ExternalMessage')) {
             $CmdParams.ExternalMessage = $ExternalMessage
+            $CmdParams.ExternalAudience = 'All'
         }
 
         if ($State -eq 'Scheduled') {
@@ -36,6 +44,26 @@ function Set-CIPPOutOfOffice {
             $EndTime = $EndTime ? $EndTime : (Get-Date $StartTime).AddDays(7)
             $CmdParams.StartTime = $StartTime
             $CmdParams.EndTime = $EndTime
+
+            # Calendar options — only included when explicitly provided
+            if ($PSBoundParameters.ContainsKey('CreateOOFEvent')) {
+                $CmdParams.CreateOOFEvent = $CreateOOFEvent
+            }
+            if ($PSBoundParameters.ContainsKey('OOFEventSubject')) {
+                $CmdParams.OOFEventSubject = $OOFEventSubject
+            }
+            if ($PSBoundParameters.ContainsKey('AutoDeclineFutureRequestsWhenOOF')) {
+                $CmdParams.AutoDeclineFutureRequestsWhenOOF = $AutoDeclineFutureRequestsWhenOOF
+            }
+            if ($PSBoundParameters.ContainsKey('DeclineEventsForScheduledOOF')) {
+                $CmdParams.DeclineEventsForScheduledOOF = $DeclineEventsForScheduledOOF
+            }
+            if ($PSBoundParameters.ContainsKey('DeclineAllEventsForScheduledOOF')) {
+                $CmdParams.DeclineAllEventsForScheduledOOF = $DeclineAllEventsForScheduledOOF
+            }
+            if ($PSBoundParameters.ContainsKey('DeclineMeetingMessage')) {
+                $CmdParams.DeclineMeetingMessage = $DeclineMeetingMessage
+            }
         }
 
         $null = New-ExoRequest -tenantid $TenantFilter -cmdlet 'Set-MailboxAutoReplyConfiguration' -cmdParams $CmdParams -Anchor $UserID
